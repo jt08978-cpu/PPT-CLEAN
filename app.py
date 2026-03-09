@@ -6,17 +6,23 @@ import numpy as np
 import io
 from PIL import Image
 
-st.set_page_config(page_title="NBLM 圖片去中文字工具", layout="centered")
-st.title("🖼️ NBLM 簡報圖片去中文字工具 (修正版)")
+st.set_page_config(page_title="NBLM 圖片去字工具專業版", layout="centered")
+st.title("🖼️ NBLM 簡報圖片去中文字 (強化標點符號版)")
 
-# 讓使用者選擇語言，避免 EasyOCR 衝突
-lang_option = st.radio(
-    "請選擇圖片中的主要中文類型：",
+# 側邊欄設定
+st.sidebar.header("工具設定")
+lang_option = st.sidebar.radio(
+    "1. 選擇語言類型：",
     ('繁體中文', '簡體中文'),
     index=0
 )
 
-# 根據選擇設定語言零件
+# 新增清除強度設定 (解決標點符號殘留)
+clean_strength = st.sidebar.slider(
+    "2. 清除邊緣強度 (數值越大，越能清除標點)：",
+    min_value=1, max_value=20, value=10, help="這會讓去色範圍向外擴張，確保包裹住細小的標點符號。"
+)
+
 @st.cache_resource
 def load_ocr(lang_choice):
     if lang_choice == '繁體中文':
@@ -29,63 +35,59 @@ reader = load_ocr(lang_option)
 uploaded_file = st.file_uploader("請上傳您的 PPTX 檔案", type="pptx")
 
 if uploaded_file:
-    if st.button("🚀 開始一鍵去中文字"):
-        with st.spinner('正在分析圖片並抹除文字中...請稍候...'):
+    if st.button("🚀 開始強力去文字"):
+        with st.spinner('正在掃描圖片並清除所有殘留符號...'):
             prs = Presentation(uploaded_file)
             
-            # 遍歷每一頁
             for slide in prs.slides:
                 for shape in slide.shapes:
-                    # 判斷是否為圖片 (類型 13)
-                    if shape.shape_type == 13: 
+                    if shape.shape_type == 13: # 圖片類型
                         try:
-                            # 1. 讀取圖片
                             img_bytes = shape.image.blob
                             nparr = np.frombuffer(img_bytes, np.uint8)
                             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            
                             if img is None: continue
                             
-                            # 2. 辨識文字
                             results = reader.readtext(img)
                             
-                            # 3. 建立遮罩修補
+                            # 建立初始遮罩
                             mask = np.zeros(img.shape[:2], dtype=np.uint8)
-                            found_text = False
+                            found_any = False
                             
                             for (bbox, text, prob) in results:
-                                # 只要偵測到文字就處理 (不分中英)
-                                found_text = True
+                                found_any = True
                                 (tl, tr, br, bl) = bbox
                                 pts = np.array([tl, tr, br, bl], np.int32)
                                 cv2.fillPoly(mask, [pts], 255)
                             
-                            if found_text:
-                                # 執行影像修補
-                                dst = cv2.inpaint(img, mask, 3, cv2.INPAINT_TELEA)
+                            if found_any:
+                                # 【關鍵修正：遮罩膨脹】
+                                # 建立一個圓形內核，將遮罩向外擴大，吃掉邊緣標點
+                                kernel = np.ones((clean_strength, clean_strength), np.uint8)
+                                mask = cv2.dilate(mask, kernel, iterations=1)
                                 
-                                # 4. 將新圖存回 PPT
+                                # 執行影像修補
+                                dst = cv2.inpaint(img, mask, 7, cv2.INPAINT_TELEA)
+                                
                                 _, buffer = cv2.imencode(".png", dst)
                                 new_img_stream = io.BytesIO(buffer)
                                 
-                                # 紀錄原圖位置
                                 left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                                
-                                # 插入新圖並移除舊圖
                                 slide.shapes.add_picture(new_img_stream, left, top, width, height)
+                                
+                                # 移除舊圖
                                 pic_element = shape._element
                                 pic_element.getparent().remove(pic_element)
+                                
                         except Exception as e:
-                            st.warning(f"某一頁圖片處理時跳過 (錯誤: {e})")
                             continue
 
-            # 存檔供下載
             output = io.BytesIO()
             prs.save(output)
-            st.success("✅ 處理完成！")
+            st.success("✅ 強化清除完成！")
             st.download_button(
-                label="📥 下載處理後的 PPTX",
+                label="📥 下載強化處理後的 PPTX",
                 data=output.getvalue(),
-                file_name="cleaned_nblm_file.pptx",
+                file_name="cleaned_pro_file.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
             )
